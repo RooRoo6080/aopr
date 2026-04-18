@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Tuple
+from typing import Tuple, Dict
 
 import numpy as np
 import scipy.sparse as sp
@@ -110,6 +110,18 @@ def solve_opr_dpr(
     damp = _choose_damp(Aw)
 
     opr, _, info_opr = solve_weighted(A, y, weights, damp=damp)
-    dpr, _, info_dpr = solve_weighted(A_opp, y_opp, weights, damp=damp)
+    
+    y_pred = A.dot(opr)
+    res = y - y_pred
+    
+    y_dpr = np.zeros_like(y)
+
+    for i in range(0, len(y), 2):
+        # Pure Points Suppressed: Target = Expected - Actual
+        # Empirically the most resilient FRC defensive tracking metric
+        y_dpr[i] = -res[i+1]
+        y_dpr[i+1] = -res[i]
+
+    dpr, _, info_dpr = solve_weighted(A, y_dpr, weights, damp=damp)
 
     return opr, dpr, {"opr": info_opr, "dpr": info_dpr}

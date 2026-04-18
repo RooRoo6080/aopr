@@ -15,6 +15,7 @@ Orchestrates a full season-wide AOPR solve:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import math
 import time
@@ -23,11 +24,13 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 import numpy as np
 
+import scipy.sparse as sp
+
 from config import CONFIG
 from tba_client import get_season_events, get_event_matches, get_event_teams, is_data_stale
 from match_normalizer import normalize_matches, MatchRecord
 from matrix_builder import build_matrices, MatrixBundle
-from solver import solve_opr_dpr, solve_weighted
+from solver import _choose_damp, solve_opr_dpr, solve_weighted
 from metrics import (
     compute_residuals,
     compute_noise_sigma,
@@ -176,44 +179,106 @@ async def run_season_pipeline() -> Dict[str, Any]:
         all_matches, residuals, opr, dpr, team_list, defenders, bundle.weights, avg_score
     )
 
-    # --- 10. Adjusted scores → AOPR solve ---------------------------------
-    y_adj = bundle.y + refunds
-    aopr, _, aopr_solver_info = solve_weighted(bundle.A, y_adj, bundle.weights)
+    # --- 10. Direct Proportional AOPR Allocation --------------------------
+    # Instead of doing a global LSQR matrix re-solve (which smears the refund across
+    # innocent/broken robots on the same alliance), we proportionally assign the 
+    # refunded match points to the alliance's primary offensive threats (Strikers).
+    team_refund_totals = np.zeros_like(opr)
+    for ri, (mi, side) in enumerate(bundle.row_to_match):
+        r_val = refunds[ri]
+        if r_val > 0:
+            m = all_matches[mi]
+            scoring_teams = m.red_teams if side == 0 else m.blue_teams
+            valid_indices = [team_idx[t] for t in scoring_teams if t in team_idx]
+            
+            # Distribute refund proportionally by each team's positive OPR
+            oprs = [max(opr[ti], 0.0) for ti in valid_indices]
+            total_opr = sum(oprs)
+            if total_opr > 0:
+                for ti, o in zip(valid_indices, oprs):
+                    team_refund_totals[ti] += r_val * (o / total_opr)
+            else:
+                # If all zero, distribute equally
+                for ti in valid_indices:
+                    team_refund_totals[ti] += r_val / len(valid_indices)
+
+    # Convert total seasonal refunded points into a per-match AOPR boost
+    match_counts_arr = np.array([match_counts.get(t, 0) for t in team_list])
+    aopr = opr + (team_refund_totals / np.maximum(match_counts_arr, 1.0))
 
     # --- 11. Variability --------------------------------------------------
     variability = compute_variability(bundle.A, residuals, team_list)
 
-    # Sanitise raw solver arrays: replace NaN/Inf with 0.0 so no invalid
-    # values propagate into audit rows, match rows, or the results dict.
+    # Sanitise raw solver arrays
     opr  = np.where(np.isfinite(opr),  opr,  0.0)
     dpr  = np.where(np.isfinite(dpr),  dpr,  0.0)
     aopr = np.where(np.isfinite(aopr), aopr, 0.0)
 
-    # --- 12. Assemble per-team results ------------------------------------
+    # --- 12. Assemble per-team results + Synergy + Roles ------------------
     results: Dict[int, Dict[str, Any]] = {}
-    # Build a per-team breaker count from match rows
+    
+    # Collect synergy (average positive residual)
+    team_positive_residuals = {t: [] for t in team_list}
     team_breaker_counts: Dict[int, int] = {t: 0 for t in team_list}
+    
     for ri, (mi, side) in enumerate(bundle.row_to_match):
+        res_val = residuals[ri]
         m = all_matches[mi]
+        scoring = m.red_teams if side == 0 else m.blue_teams
+        for t in scoring:
+            if res_val > 0:
+                if t in team_positive_residuals:
+                    team_positive_residuals[t].append(res_val)
+                    
         if "breaker" in m.status_flags or m.is_excluded:
-            scoring = m.red_teams if side == 0 else m.blue_teams
             for t in scoring:
                 if t in team_breaker_counts:
                     team_breaker_counts[t] += 1
+                    
+    # Pre-calculate role thresholds
+    opr_valid = opr[match_counts_arr >= CONFIG.min_matches_to_rank]
+    if len(opr_valid) > 0:
+        opr_mean = float(np.mean(opr_valid))
+        opr_p75 = float(np.percentile(opr_valid, 75))
+        opr_p25 = float(np.percentile(opr_valid, 25))
+    else:
+        opr_mean = opr_p75 = opr_p25 = 0.0
+        
+    var_vals = [variability.get(t, 0) for t in team_list if match_counts.get(t, 0) >= CONFIG.min_matches_to_rank]
+    var_p25 = float(np.percentile(var_vals, 25)) if var_vals else 0.0
 
     for i, team in enumerate(team_list):
         mc = match_counts.get(team, 0)
+        pos_res_list = team_positive_residuals.get(team, [])
+        
+        # 1. Basic Synergy (Average Positive Residual)
+        synergy = sum(pos_res_list) / len(pos_res_list) if pos_res_list else 0.0
+        
+        # 2. Assign Algorithmic Roles
+        role = ""
+        if team in defenders:
+            role = "Defender"
+        elif synergy > 3.0 and opr[i] < opr_mean:
+            role = "Enabler"
+        elif opr[i] > opr_p75 and variability.get(team, 0.0) < var_p25:
+            role = "Anchor"
+        elif opr[i] > opr_p75:
+            role = "Striker"
+        elif opr[i] < opr_p25:
+            role = "Support"
+
         results[team] = {
             "team_number": team,
             "nickname":    team_nicknames.get(team, ""),
             "opr":         _safe(opr[i]),
             "dpr":         _safe(dpr[i]),
+            "synergy":     _safe(synergy),
             "aopr":        _safe(aopr[i]),
             "delta":       _safe(float(aopr[i]) - float(opr[i])),
             "variability": _safe(variability.get(team, 0.0)),
             "match_count": mc,
             "breaker_count": team_breaker_counts.get(team, 0),
-            "is_defender": team in defenders,
+            "primary_role": role,
             "low_match_warning": mc < CONFIG.min_matches_to_rank,
         }
 
@@ -276,10 +341,27 @@ async def run_season_pipeline() -> Dict[str, Any]:
     for t in team_match_rows:
         team_match_rows[t].sort(key=lambda r: r["timestamp"])
 
+    # --- 13.5 Compute Event OPRs ----------------------------------------------
+    event_oprs: Dict[str, Dict[int, float]] = {}
+    for ek in event_meta.keys():
+        ev_matches = [m for m in all_matches if m.event_key == ek]
+        if not ev_matches:
+            continue
+        try:
+            eb = build_matrices(ev_matches)
+            e_opr, _, _ = solve_weighted(eb.A, eb.y, eb.weights)
+            e_dict = {}
+            for ti, team in enumerate(eb.team_list):
+                e_dict[team] = _safe(e_opr[ti])
+            event_oprs[ek] = e_dict
+        except Exception as exc:
+            logger.warning("Failed event OPR for %s: %s", ek, exc)
+
     # --- 14. Persist audit + snapshot; keep match rows in memory only ---------
     save_audit_records(audit_rows)
     snapshot_payload = {
         "team_results": results,
+        "event_oprs": event_oprs,
         "meta": {
             "year": year,
             "total_matches": len(all_matches),
@@ -289,7 +371,7 @@ async def run_season_pipeline() -> Dict[str, Any]:
             "avg_score":   _safe(avg_score, 3),
             "defender_count": len(defenders),
             "solver_info": solver_info,
-            "aopr_solver_info": aopr_solver_info,
+            "aopr_solver_info": solver_info,
             "solve_timestamp": datetime.now().timestamp(),
             "event_meta": event_meta,
         },
@@ -327,7 +409,7 @@ def get_cached_results() -> Optional[Dict[str, Any]]:
 def _coerce_keys(results: Dict[str, Any]) -> Dict[str, Any]:
     """
     JSON serialisation turns integer dict keys into strings.
-    Re-coerce team_results and event_membership back to int keys.
+    Re-coerce team_results, event_membership, and event_oprs back to int keys.
     """
     if "team_results" in results:
         results["team_results"] = {
@@ -337,5 +419,10 @@ def _coerce_keys(results: Dict[str, Any]) -> Dict[str, Any]:
         results["event_membership"] = {
             k: [int(t) for t in v]
             for k, v in results["event_membership"].items()
+        }
+    if "event_oprs" in results:
+        results["event_oprs"] = {
+            ek: {int(t): opr for t, opr in val_dict.items()}
+            for ek, val_dict in results["event_oprs"].items()
         }
     return results

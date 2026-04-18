@@ -78,8 +78,6 @@ def build_matrices(
 
     rows_A: List[int] = []
     cols_A: List[int] = []
-    rows_Aopp: List[int] = []
-    cols_Aopp: List[int] = []
     y = np.zeros(n_rows)
     y_opp = np.zeros(n_rows)
     weights = np.zeros(n_rows)
@@ -101,10 +99,6 @@ def build_matrices(
                 if t in team_idx:
                     rows_A.append(ri)
                     cols_A.append(team_idx[t])
-            for t in opp_teams:
-                if t in team_idx:
-                    rows_Aopp.append(ri)
-                    cols_Aopp.append(team_idx[t])
 
             # Apply match quality weight (set later by breaker detection)
             q = m.quality_weight if not m.is_excluded else 0.0
@@ -116,9 +110,7 @@ def build_matrices(
     A = sp.csr_matrix(
         ([1.0] * len(rows_A), (rows_A, cols_A)), shape=(n_rows, n_teams)
     )
-    A_opp = sp.csr_matrix(
-        ([1.0] * len(rows_Aopp), (rows_Aopp, cols_Aopp)), shape=(n_rows, n_teams)
-    )
+    A_opp = A
 
     return MatrixBundle(A, A_opp, y, y_opp, weights, team_list, row_to_match)
 

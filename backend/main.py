@@ -140,7 +140,10 @@ def _to_team_stats(r: dict) -> TeamStats:
         nickname=r.get("nickname", ""),
         opr=r["opr"],
         dpr=r["dpr"],
+        synergy=r.get("synergy", 0.0),
+        primary_role=r.get("primary_role", ""),
         aopr=r["aopr"],
+        event_opr=r.get("event_opr"),
         delta=r["delta"],
         variability=r["variability"],
         match_count=r["match_count"],
@@ -209,18 +212,29 @@ async def list_events() -> List[Dict[str, Any]]:
     results = _require_results()
     event_meta: Dict[str, dict] = results.get("meta", {}).get("event_meta", {})
     membership: Dict[str, List[int]] = results.get("event_membership", {})
+    team_results: Dict[int, Dict] = results.get("team_results", {})
 
-    out = [
-        {
+    out = []
+    for ek, em in event_meta.items():
+        teams_at_event = membership.get(ek, [])
+        
+        # Calculate ECI (Event Competitiveness Index)
+        # Average global Season AOPR of the event's top 24 playoff cohort
+        aoprs = [team_results.get(t, {}).get("aopr", 0.0) for t in teams_at_event if t in team_results]
+        aoprs.sort(reverse=True)
+        top_cohort = aoprs[:24]
+        eci = round(sum(top_cohort) / len(top_cohort), 1) if top_cohort else 0.0
+
+        out.append({
             "event_key":   ek,
             "name":        em.get("name", ek),
             "week":        em.get("week"),
             "event_type":  em.get("event_type"),
             "district_key": em.get("district_key"),
-            "team_count":  len(membership.get(ek, [])) or em.get("team_count", 0),
-        }
-        for ek, em in event_meta.items()
-    ]
+            "team_count":  len(teams_at_event) or em.get("team_count", 0),
+            "eci":         eci,
+        })
+        
     out.sort(key=lambda e: (e.get("week") or 99, e["event_key"]))
     return out
 
@@ -228,10 +242,10 @@ async def list_events() -> List[Dict[str, Any]]:
 @app.get("/api/v1/event/{event_key}/stats", tags=["Events"])
 async def event_stats(
     event_key: str,
-    mode: str = Query("adjusted", regex="^(raw|adjusted)$"),
+    mode: str = Query("adjusted", pattern="^(raw|adjusted)$"),
     sort_by: str = Query("aopr"),
     ascending: bool = Query(False),
-) -> Dict[str, Any]:
+) -> Dict[int, Any]:
     """
     Event-level stats: ranked team list + aggregates (avg OPR/AOPR, top teams,
     defender list).  mode=raw sorts by OPR; mode=adjusted (default) by AOPR.
@@ -247,7 +261,14 @@ async def event_stats(
             detail=f"Event '{event_key}' not found or has no team membership data.",
         )
 
-    rows = [v for k, v in team_results.items() if k in allowed]
+    # Attach event_opr exclusively for this event
+    event_oprs = results.get("event_oprs", {}).get(event_key, {})
+    rows = []
+    for k, v in team_results.items():
+        if k in allowed:
+            row_copy = dict(v)
+            row_copy["event_opr"] = event_oprs.get(k)
+            rows.append(row_copy)
     primary = "opr" if mode == "raw" else "aopr"
     sort_field = sort_by if sort_by in {"opr","dpr","aopr","delta","variability","match_count"} else primary
     rows = _rank_rows(rows, sort_field, ascending)

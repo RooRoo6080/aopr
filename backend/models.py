@@ -9,12 +9,14 @@ class TeamStats(BaseModel):
     nickname: str = ""
     opr: float = Field(description="Raw offensive power rating")
     dpr: float = Field(description="Defensive power rating")
+    synergy: float = Field(default=0.0, description="Average positive residual (Boost ceiling)")
     aopr: float = Field(description="Adjusted OPR after defensive refunds")
+    event_opr: Optional[float] = Field(default=None, description="Event-specific OPR")
     delta: float = Field(description="AOPR − OPR")
     variability: float = Field(description="Match-to-match instability score")
     match_count: int
     breaker_count: int = Field(default=0, description="Matches flagged as OPR breakers or excluded")
-    is_defender: bool = False
+    primary_role: str = Field(default="", description="Algorithmic role classification")
     low_match_warning: bool = False
     rank: int = 0
 

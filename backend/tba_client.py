@@ -122,6 +122,12 @@ async def get_season_events(year: int) -> List[Dict]:
         start = ev.get("start_date", "")
         if start and not start.startswith(str(year)):
             continue
+            
+        # Filter strictly down to California to reduce API calls
+        state = ev.get("state_prov", "")
+        if state not in ("CA", "California"):
+            continue
+            
         filtered.append(ev)
 
     logger.info(
