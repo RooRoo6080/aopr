@@ -141,7 +141,12 @@ def compute_refunds(
                 # suppression surplus: DPR − (threshold × OPR)
                 # positive only when the defender is genuinely above threshold
                 surplus = dpr[di] - CONFIG.defender_threshold_multiplier * max(opr[di], 0.0)
-                credit = max(0.0, surplus) * split * multiplier
+                credit = (
+                    max(0.0, surplus)
+                    * split
+                    * multiplier
+                    * CONFIG.refund_credit_multiplier
+                )
                 total_credit += credit
 
             # Hard cap: refund ≤ positive residual

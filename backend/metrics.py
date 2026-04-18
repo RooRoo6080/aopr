@@ -109,12 +109,23 @@ def apply_breaker_weights(
 
 def compute_variability(
     A: sp.spmatrix,
+    opr: np.ndarray,
     residuals: np.ndarray,
     team_list: List[int],
 ) -> Dict[int, float]:
     """
-    Variability score for each team: std-dev of residuals across that team's rows.
-    Uses weighted std if weights are available; plain std otherwise.
+    Variability for each team as a standard deviation around that team's OPR.
+
+    For each alliance row a team appears in:
+      expected_alliance = sum(team OPRs)
+      actual_alliance   = expected_alliance - residual
+
+    We estimate the team's row-level offensive contribution by allocating the
+    alliance residual evenly across alliance members:
+      observed_team_contrib ~= team_opr - residual / alliance_size
+
+    The returned variability is the standard deviation of those observed
+    per-row team contributions across the season.
     """
     var: Dict[int, float] = {}
     A_csc = A.tocsc()
@@ -124,7 +135,15 @@ def compute_variability(
         if len(row_indices) < 2:
             var[team] = 0.0
         else:
-            var[team] = float(np.std(residuals[row_indices]))
+            team_opr = float(opr[col_idx])
+            row_contribs = []
+            for ri in row_indices:
+                alliance_size = int(A.getrow(ri).nnz)
+                if alliance_size <= 0:
+                    continue
+                row_contribs.append(team_opr - (float(residuals[ri]) / alliance_size))
+
+            var[team] = float(np.std(row_contribs)) if len(row_contribs) >= 2 else 0.0
     return var
 
 
