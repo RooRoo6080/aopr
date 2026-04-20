@@ -21,6 +21,8 @@ class SeasonConfig:
     defender_threshold_multiplier: float = 1.5
     noise_exclusion_sigma: float = 2.5
     oppr_breaker_sigma: float = 2.0
+    missed_elims_penalty: float = 12.0
+    refund_credit_multiplier: float = 1.75
     tba_base_url: str = "https://www.thebluealliance.com/api/v3"
     tba_auth_key: str = field(default_factory=lambda: os.environ.get("TBA_AUTH_KEY", ""))
     db_path: str = field(default_factory=lambda: os.environ.get("DB_PATH", "aopr.db"))

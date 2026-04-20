@@ -180,40 +180,47 @@ async def run_season_pipeline() -> Dict[str, Any]:
         all_matches, residuals, opr, dpr, team_list, defenders, bundle.weights, avg_score
     )
 
-    # --- 10. Direct Proportional AOPR Allocation --------------------------
-    # Instead of doing a global LSQR matrix re-solve (which smears the refund across
-    # innocent/broken robots on the same alliance), we proportionally assign the 
-    # refunded match points to the alliance's primary offensive threats (Strikers).
-    team_refund_totals = np.zeros_like(opr)
-    for ri, (mi, side) in enumerate(bundle.row_to_match):
-        r_val = refunds[ri]
-        if r_val > 0:
-            m = all_matches[mi]
-            scoring_teams = m.red_teams if side == 0 else m.blue_teams
-            valid_indices = [team_idx[t] for t in scoring_teams if t in team_idx]
-            
-            # Distribute refund proportionally by each team's positive OPR
-            oprs = [max(opr[ti], 0.0) for ti in valid_indices]
-            total_opr = sum(oprs)
-            if total_opr > 0:
-                for ti, o in zip(valid_indices, oprs):
-                    team_refund_totals[ti] += r_val * (o / total_opr)
-            else:
-                # If all zero, distribute equally
-                for ti in valid_indices:
-                    team_refund_totals[ti] += r_val / len(valid_indices)
+    # --- 10. AOPR re-solve on adjusted alliance scores --------------------
+    adjusted_y = bundle.y + refunds
+    aopr, _aopr_damp, aopr_solver_info = solve_weighted(
+        bundle.A, adjusted_y, bundle.weights
+    )
 
-    # Convert total seasonal refunded points into a per-match AOPR boost
     match_counts_arr = np.array([match_counts.get(t, 0) for t in team_list])
-    aopr = opr + (team_refund_totals / np.maximum(match_counts_arr, 1.0))
 
     # --- 11. Variability --------------------------------------------------
-    variability = compute_variability(bundle.A, residuals, team_list)
+    variability = compute_variability(bundle.A, opr, residuals, team_list)
+
+    # --- 11.5 Elimination participation penalty ---------------------------
+    event_playoff_teams: Dict[str, Set[int]] = {}
+    for m in all_matches:
+        if not m.is_playoff:
+            continue
+        teams = event_playoff_teams.setdefault(m.event_key, set())
+        teams.update(m.red_teams)
+        teams.update(m.blue_teams)
+
+    elim_penalties: Dict[int, float] = {}
+    ranking_opr = np.array(opr, copy=True)
+    ranking_aopr = np.array(aopr, copy=True)
+    for i, team in enumerate(team_list):
+        attended_events = [
+            ek for ek, teams in event_membership.items() if team in teams
+        ]
+        missed_elims = sum(
+            1 for ek in attended_events if team not in event_playoff_teams.get(ek, set())
+        )
+        penalty = CONFIG.missed_elims_penalty * missed_elims
+        elim_penalties[team] = penalty
+        ranking_opr[i] = max(float(opr[i]) - penalty, 0.0)
+        ranking_aopr[i] = max(float(aopr[i]) - penalty, 0.0)
 
     # Sanitise raw solver arrays
     opr  = np.where(np.isfinite(opr),  opr,  0.0)
     dpr  = np.where(np.isfinite(dpr),  dpr,  0.0)
     aopr = np.where(np.isfinite(aopr), aopr, 0.0)
+    ranking_opr = np.where(np.isfinite(ranking_opr), ranking_opr, 0.0)
+    ranking_aopr = np.where(np.isfinite(ranking_aopr), ranking_aopr, 0.0)
 
     # --- 12. Assemble per-team results + Synergy + Roles ------------------
     results: Dict[int, Dict[str, Any]] = {}
@@ -237,7 +244,7 @@ async def run_season_pipeline() -> Dict[str, Any]:
                     team_breaker_counts[t] += 1
                     
     # Pre-calculate role thresholds
-    opr_valid = opr[match_counts_arr >= CONFIG.min_matches_to_rank]
+    opr_valid = ranking_opr[match_counts_arr >= CONFIG.min_matches_to_rank]
     if len(opr_valid) > 0:
         opr_mean = float(np.mean(opr_valid))
         opr_p75 = float(np.percentile(opr_valid, 75))
@@ -259,23 +266,23 @@ async def run_season_pipeline() -> Dict[str, Any]:
         role = ""
         if team in defenders:
             role = "Defender"
-        elif synergy > 3.0 and opr[i] < opr_mean:
+        elif synergy > 3.0 and ranking_opr[i] < opr_mean:
             role = "Enabler"
-        elif opr[i] > opr_p75 and variability.get(team, 0.0) < var_p25:
+        elif ranking_opr[i] > opr_p75 and variability.get(team, 0.0) < var_p25:
             role = "Anchor"
-        elif opr[i] > opr_p75:
+        elif ranking_opr[i] > opr_p75:
             role = "Striker"
-        elif opr[i] < opr_p25:
+        elif ranking_opr[i] < opr_p25:
             role = "Support"
 
         results[team] = {
             "team_number": team,
             "nickname":    team_nicknames.get(team, ""),
-            "opr":         _safe(opr[i]),
+            "opr":         _safe(ranking_opr[i]),
             "dpr":         _safe(dpr[i]),
             "synergy":     _safe(synergy),
-            "aopr":        _safe(aopr[i]),
-            "delta":       _safe(float(aopr[i]) - float(opr[i])),
+            "aopr":        _safe(ranking_aopr[i]),
+            "delta":       _safe(float(ranking_aopr[i]) - float(ranking_opr[i])),
             "variability": _safe(variability.get(team, 0.0)),
             "match_count": mc,
             "breaker_count": team_breaker_counts.get(team, 0),
@@ -307,7 +314,7 @@ async def run_season_pipeline() -> Dict[str, Any]:
             expected_score = float(sum(
                 opr_arr[team_idx[t]] for t in scoring if t in team_idx
             ))
-            adj_score = float(expected_score + refunds[ri])
+            adj_score = float(actual_score + refunds[ri])
             row_residual = float(residuals[ri])
 
             # defender keys on opposing side
@@ -372,7 +379,7 @@ async def run_season_pipeline() -> Dict[str, Any]:
             "avg_score":   _safe(avg_score, 3),
             "defender_count": len(defenders),
             "solver_info": solver_info,
-            "aopr_solver_info": solver_info,
+            "aopr_solver_info": aopr_solver_info,
             "solve_timestamp": datetime.now().timestamp(),
             "event_meta": event_meta,
         },

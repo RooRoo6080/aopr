@@ -104,9 +104,13 @@
   </div>
 
   <!-- Event filter -->
-  <select id="ev-sel" onchange="onEventChange()" style="max-width:200px">
-    <option value="">All Events</option>
-  </select>
+  <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+    <input id="ev-search" type="text" placeholder="Search event…" style="width:170px"
+           oninput="filterEventOptions()"/>
+    <select id="ev-sel" onchange="onEventChange()" style="max-width:220px">
+      <option value="">All Events</option>
+    </select>
+  </div>
 
   <!-- Search -->
   <input id="search" type="text" placeholder="Search team…" style="width:140px"
@@ -210,6 +214,7 @@
 <script>
 const API = '';
 let allData = [], mode = 'raw', gridApi = null, selEvent = '';
+let allEvents = [];
 
 // ─── Number formatters ─────────────────────────────────────────────────────
 const f1  = v => v == null ? '—' : (+v).toFixed(1);
@@ -331,14 +336,8 @@ async function loadAll() {
     }
 
     // Event dropdown
-    const sel = document.getElementById('ev-sel');
-    const cur = sel.value;
-    while (sel.options.length > 1) sel.remove(1);
-    (events||[]).forEach(ev => {
-      const eciStr = ev.eci ? ` | ECI: ${ev.eci}` : '';
-      sel.add(new Option(`${ev.name} (${ev.team_count || '?'} teams${eciStr})`, ev.event_key));
-    });
-    if (cur) sel.value = cur;
+    allEvents = Array.isArray(events) ? events : [];
+    filterEventOptions();
 
     await loadTeams();
   } catch(e) {
@@ -348,10 +347,22 @@ async function loadAll() {
 }
 
 async function loadTeams() {
-  let url = `${API}/api/v1/teams?sort_by=aopr&ascending=false`;
-  if (selEvent) url += `&event_key=${encodeURIComponent(selEvent)}`;
-  const teams = await fetch(url).then(r=>r.json()).catch(()=>[]);
-  allData = Array.isArray(teams) ? teams : [];
+  let data = [];
+  if (selEvent) {
+    const eventUrl = `${API}/api/v1/event/${encodeURIComponent(selEvent)}/stats?mode=${mode === 'raw' ? 'raw' : 'adjusted'}&sort_by=${mode === 'raw' ? 'opr' : 'aopr'}&ascending=false`;
+    const eventStats = await fetch(eventUrl)
+      .then(async r => r.ok ? r.json() : null)
+      .catch(() => null);
+    data = Array.isArray(eventStats?.team_stats) ? eventStats.team_stats : [];
+  }
+
+  if (!data.length) {
+    let teamsUrl = `${API}/api/v1/teams?sort_by=${mode === 'raw' ? 'opr' : 'aopr'}&ascending=false`;
+    if (selEvent) teamsUrl += `&event_key=${encodeURIComponent(selEvent)}`;
+    const teams = await fetch(teamsUrl).then(r=>r.json()).catch(()=>[]);
+    data = Array.isArray(teams) ? teams : [];
+  }
+  allData = data;
   applyFilters();
 }
 
@@ -359,6 +370,31 @@ async function loadTeams() {
 async function onEventChange() {
   selEvent = document.getElementById('ev-sel').value;
   await loadTeams();
+}
+
+function filterEventOptions() {
+  const sel = document.getElementById('ev-sel');
+  const query = (document.getElementById('ev-search').value || '').trim().toLowerCase();
+  const currentValue = selEvent || sel.value;
+
+  while (sel.options.length > 1) sel.remove(1);
+
+  const filteredEvents = allEvents.filter(ev => {
+    if (!query) return true;
+    const haystack = [
+      ev.name || '',
+      ev.event_key || '',
+      ev.week != null ? `week ${ev.week}` : '',
+    ].join(' ').toLowerCase();
+    return haystack.includes(query);
+  });
+
+  filteredEvents.forEach(ev => {
+    const eciStr = ev.eci ? ` | ECI: ${ev.eci}` : '';
+    sel.add(new Option(`${ev.name} (${ev.team_count || '?'} teams${eciStr})`, ev.event_key));
+  });
+
+  sel.value = filteredEvents.some(ev => ev.event_key === currentValue) ? currentValue : '';
 }
 
 // ─── Filters ───────────────────────────────────────────────────────────────
@@ -395,7 +431,10 @@ function setMode(m) {
   mode = m;
   document.getElementById('btn-raw').classList.toggle('on', m==='raw');
   document.getElementById('btn-adj').classList.toggle('on', m==='aopr');
-  if (gridApi) { gridApi.setGridOption('columnDefs', cols()); applyFilters(); }
+  if (gridApi) {
+    gridApi.setGridOption('columnDefs', cols());
+    loadTeams();
+  }
 }
 
 // ─── Export ────────────────────────────────────────────────────────────────

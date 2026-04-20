@@ -127,7 +127,7 @@ def _teams_for_event(results: Dict[str, Any], event_key: str) -> set:
 
 
 def _rank_rows(rows: list, sort_by: str, ascending: bool) -> list:
-    valid = {"opr", "dpr", "aopr", "delta", "variability", "match_count"}
+    valid = {"opr", "event_opr", "dpr", "aopr", "delta", "variability", "match_count"}
     key = sort_by if sort_by in valid else "aopr"
     rows.sort(key=lambda r: r.get(key, 0), reverse=not ascending)
     return [dict(r, rank=i + 1) for i, r in enumerate(rows)]
@@ -270,7 +270,7 @@ async def event_stats(
             row_copy["event_opr"] = event_oprs.get(k)
             rows.append(row_copy)
     primary = "opr" if mode == "raw" else "aopr"
-    sort_field = sort_by if sort_by in {"opr","dpr","aopr","delta","variability","match_count"} else primary
+    sort_field = sort_by if sort_by in {"opr","event_opr","dpr","aopr","delta","variability","match_count"} else primary
     rows = _rank_rows(rows, sort_field, ascending)
 
     ranked = [r for r in rows if r.get("match_count", 0) >= CONFIG.min_matches_to_rank]
@@ -347,13 +347,20 @@ async def all_teams(
 ) -> List[TeamStats]:
     results = _require_results()
     team_results: Dict[int, Dict] = dict(results.get("team_results", {}))
+    event_oprs: Dict[int, float] = {}
 
     if event_key:
         allowed = _teams_for_event(results, event_key)
         if allowed:
             team_results = {t: v for t, v in team_results.items() if t in allowed}
+            event_oprs = results.get("event_oprs", {}).get(event_key, {})
 
-    rows = list(team_results.values())
+    rows = []
+    for team_number, row in team_results.items():
+        row_copy = dict(row)
+        if event_key:
+            row_copy["event_opr"] = event_oprs.get(team_number)
+        rows.append(row_copy)
     if min_matches > 0:
         rows = [r for r in rows if r.get("match_count", 0) >= min_matches]
     if defenders_only:

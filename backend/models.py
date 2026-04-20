@@ -13,7 +13,7 @@ class TeamStats(BaseModel):
     aopr: float = Field(description="Adjusted OPR after defensive refunds")
     event_opr: Optional[float] = Field(default=None, description="Event-specific OPR")
     delta: float = Field(description="AOPR − OPR")
-    variability: float = Field(description="Match-to-match instability score")
+    variability: float = Field(description="Standard deviation of estimated per-match contribution around OPR")
     match_count: int
     breaker_count: int = Field(default=0, description="Matches flagged as OPR breakers or excluded")
     is_defender: bool = Field(default=False, description="Whether the team was classified as a defender")

@@ -9,6 +9,8 @@ import scipy.sparse.linalg as spla
 
 logger = logging.getLogger(__name__)
 
+MIN_RIDGE_DAMP = 0.01
+
 
 # ---------------------------------------------------------------------------
 # Adaptive damping
@@ -26,7 +28,7 @@ def _choose_damp(Aw: sp.spmatrix) -> float:
         sv = spla.svds(Aw, k=k, return_singular_vectors=False)
         cond = float(sv.max()) / (float(sv.min()) + 1e-12)
         if cond < 1e6:
-            return 0.0
+            return MIN_RIDGE_DAMP
         elif cond < 1e8:
             return 0.05
         else:
